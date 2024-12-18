@@ -61,6 +61,9 @@ Return true if the handle is registered, false otherwise.
 static constexpr int64_t MAX_PARALLEL_HASH = 4096;	// Assume there are at most 64 pp stages and 64 tp stages
 static void* context_worker_k_cache_addr[MAX_PARALLEL_HASH];
 static void* context_worker_v_cache_addr[MAX_PARALLEL_HASH];
+static void* decoding_worker_k_cache_addr[MAX_PARALLEL_HASH];
+static void* decoding_worker_v_cache_addr[MAX_PARALLEL_HASH];
+
 bool register_ipc_mem_handle(
 	std::vector<int64_t> k_cache_handle_vec,
 	std::vector<int64_t> v_cache_handle_vec,
@@ -238,6 +241,122 @@ void migrate_blocks(
 								overlap_start_head - context_start_head,
 								0, 0) * dtype_size,
 						(uint64_t) ((block_size * head_dim * dtype_size) * heads_per_context_worker),
+						(size_t) ((overlap_end_head - overlap_start_head) * block_size * head_dim * dtype_size),
+						(size_t) (overlap_end_layer - overlap_start_layer),
+						cudaMemcpyDeviceToDevice,
+						stream
+					));
+				}
+			}
+		}
+	}
+}
+
+
+
+void migrate_blocks2(
+	// Parallelism parameters for the context stage engine
+	const int64_t decoding_pp_size,
+	const int64_t decoding_tp_size,
+
+	// Block indexes of the context stage engine
+	const std::vector<int64_t> &decoding_block_indexes,
+
+	// Parallelism parameters for the decoding stage engine
+	const int64_t context_pp_size,
+	const int64_t context_tp_size,
+
+	// Rank of the decoding stage worker that calls this function
+	const int64_t context_pp_rank,
+	const int64_t context_tp_rank,
+
+	// Block indexes of the decoding stage engine
+	const std::vector<int64_t> &context_block_indexes,
+
+	// The decoding stage worker's KV cache
+	torch::Tensor context_worker_k_cache,	// [num_blocks, layers_per_decoding_worker, heads_per_decoding_worker, block_size, head_dim]
+	torch::Tensor context_worker_v_cache
+) {
+	cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+	assert_whenever(context_worker_k_cache.is_contiguous());
+	assert_whenever(context_worker_v_cache.is_contiguous());
+
+	// Calculate some misc stuff
+	const int64_t layers_per_context_worker = context_worker_k_cache.size(1);
+	const int64_t heads_per_context_worker = context_worker_k_cache.size(2);
+	const int64_t block_size = context_worker_k_cache.size(3);
+	const int64_t head_dim = context_worker_k_cache.size(4);
+	const int64_t num_layers = layers_per_context_worker * context_pp_size;
+	const int64_t num_heads = heads_per_context_worker * context_tp_size;
+	const int64_t layers_per_decoding_worker = num_layers / decoding_pp_size;
+	const int64_t heads_per_decoding_worker = num_heads / decoding_tp_size;
+	const int64_t num_blocks_to_copy = context_block_indexes.size();
+	const int64_t dtype_size = context_worker_k_cache.dtype().itemsize();
+
+
+	// The current context worker's region of the k/v cache
+	const int64_t context_start_layer = context_pp_rank * layers_per_context_worker;
+	const int64_t context_end_layer = context_start_layer + layers_per_context_worker;
+	const int64_t context_start_head = context_tp_rank * heads_per_context_worker;
+	const int64_t context_end_head = context_start_head + heads_per_context_worker;	
+
+	for (int64_t decoding_pp_rank = 0; decoding_pp_rank < decoding_pp_size; ++decoding_pp_rank) {
+	// First we iterate over every decoding pp stage
+		const int64_t decoding_start_layer = decoding_pp_rank * layers_per_decoding_worker;
+		const int64_t decoding_end_layer = decoding_start_layer + layers_per_decoding_worker;
+		if (decoding_end_layer <= context_start_layer || decoding_start_layer >= context_end_layer) {
+			continue;
+		}
+		for (int64_t decoding_tp_rank = 0; decoding_tp_rank < decoding_tp_size; ++decoding_tp_rank) {
+			// Then we iterate over every decoding tp worker in the current pp stage
+			const int64_t decoding_start_head = decoding_tp_rank * heads_per_decoding_worker;
+			const int64_t decoding_end_head = decoding_start_head + heads_per_decoding_worker;
+			if (decoding_end_head <= context_start_head || decoding_start_head >= context_end_head) {
+				continue;
+			}
+
+			// The current decoding worker's region intersects with the current context worker's region
+			// So we need to copy something from the decoding worker to the context worker
+			// The decoding worker holds k/v cache of range [decoding_start_layer, decoding_end_layer) x [decoding_start_head, decoding_end_head)
+			// The context worker holds k/v cache of range [context_start_layer, context_end_layer) x [context_start_head, context_end_head)
+			// We then calculate the intersection of these two ranges
+			const int64_t overlap_start_layer = std::max(decoding_start_layer, context_start_layer);
+			const int64_t overlap_end_layer = std::min(decoding_end_layer, context_end_layer);
+			const int64_t overlap_start_head = std::max(decoding_start_head, context_start_head);
+			const int64_t overlap_end_head = std::min(decoding_end_head, context_end_head);
+			assert_whenever(overlap_start_layer < overlap_end_layer);
+			assert_whenever(overlap_start_head < overlap_end_head);
+
+			// Note that this function is synchronous with respect to the host only if the source or destination of the transfer is host memory.
+			// Note also that this copy is serialized with respect to all pending and future asynchronous work in to the current device, the copy's source device, and the copy's destination device (use cudaMemcpy3DPeerAsync to avoid this synchronization).
+
+			// kv cache shape: [num_blocks, layers_per_worker, heads_per_worker, block_size, head_dim]
+			for (int64_t block_id = 0; block_id < num_blocks_to_copy; ++block_id) {
+				const int64_t decoding_block_index = decoding_block_indexes[block_id];
+				const int64_t context_block_index = context_block_indexes[block_id];
+				for (int is_value = 0; is_value < 2; ++is_value) {
+					const int64_t decoding_worker_hash = (decoding_pp_rank<<6) + decoding_tp_rank;
+					char* decoding_worker_base_ptr = (char*) (is_value ? decoding_worker_v_cache_addr[decoding_worker_hash] : decoding_worker_k_cache_addr[decoding_worker_hash]);
+					if (!decoding_worker_base_ptr) {
+						// This decoding worker has not registered. Panic
+						fprintf(stderr, "Error: decoding worker %ld-%ld has not registered\n", decoding_pp_rank, decoding_tp_rank);
+						exit(1);
+						}
+					CUDA_CHECK(cudaMemcpy2DAsync(
+						(char*) (is_value ? context_worker_v_cache.data_ptr() : context_worker_k_cache.data_ptr())
+							+ INDEX_5D(0, layers_per_context_worker, heads_per_context_worker, block_size, head_dim,
+								context_block_index,
+								overlap_start_layer - context_start_layer,
+								overlap_start_head - context_start_head,
+								0, 0) * dtype_size,
+						(uint64_t) ((block_size * head_dim * dtype_size) * heads_per_context_worker),
+						decoding_worker_base_ptr
+							+ INDEX_5D(0, layers_per_decoding_worker, heads_per_decoding_worker, block_size, head_dim,
+								decoding_block_index,
+								overlap_start_layer - decoding_start_layer,
+								overlap_start_head - decoding_start_head,
+								0, 0) * dtype_size,
+						(uint64_t) ((block_size * head_dim * dtype_size) * heads_per_decoding_worker),
 						(size_t) ((overlap_end_head - overlap_start_head) * block_size * head_dim * dtype_size),
 						(size_t) (overlap_end_layer - overlap_start_layer),
 						cudaMemcpyDeviceToDevice,

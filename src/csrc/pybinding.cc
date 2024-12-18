@@ -93,4 +93,5 @@ TORCH_LIBRARY(block_migration_ops, m) {
   m.def("get_ipc_mem_handle", &st::util::get_ipc_mem_handle);
   m.def("register_ipc_mem_handle", &st::util::register_ipc_mem_handle);
   m.def("migrate_blocks", &st::util::migrate_blocks);
+  m.def("migrate_blocks2", &st::util::migrate_blocks2);
 }

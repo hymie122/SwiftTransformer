@@ -39,4 +39,22 @@ void migrate_blocks(
 	torch::Tensor decoding_worker_v_cache
 );
 
+void migrate_blocks2(
+	const int64_t decoding_pp_size,
+	const int64_t decoding_tp_size,
+
+	const std::vector<int64_t> &decoding_block_indexes,
+
+	const int64_t context_pp_size,
+	const int64_t context_tp_size,
+
+	const int64_t context_pp_rank,
+	const int64_t context_tp_rank,
+
+	const std::vector<int64_t> &context_block_indexes,
+
+	torch::Tensor context_worker_k_cache,
+	torch::Tensor context_worker_v_cache
+);
+
 } // namespace st::util
