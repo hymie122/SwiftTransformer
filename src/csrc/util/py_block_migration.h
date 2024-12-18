@@ -21,6 +21,15 @@ bool register_ipc_mem_handle(
 	const std::vector<int64_t> &decoding_parallel_config
 );
 
+bool register_ipc_mem_handle2(
+	std::vector<int64_t> k_cache_handle_vec,
+	std::vector<int64_t> v_cache_handle_vec,
+	int64_t num_layers,
+	int64_t num_heads,
+	const std::vector<int64_t> &decoding_parallel_config,
+	const std::vector<int64_t> &context_parallel_config
+);
+
 void migrate_blocks(
 	const int64_t context_pp_size,
 	const int64_t context_tp_size,
