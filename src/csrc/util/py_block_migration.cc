@@ -10,6 +10,8 @@
 #include "cuda_utils.h"
 #include "debug_utils.h"
 
+#include <iostream>
+
 namespace st::util {
 
 
@@ -288,6 +290,9 @@ void migrate_blocks(
 				for (int is_value = 0; is_value < 2; ++is_value) {
 					const int64_t context_worker_hash = (context_pp_rank<<6) + context_tp_rank;
 					char* context_worker_base_ptr = (char*) (is_value ? context_worker_v_cache_addr[context_worker_hash] : context_worker_k_cache_addr[context_worker_hash]);
+					std::cout<<"is_value:"<<is_value<<std::endl;
+					std::cout<<"context_worker_hash:"<<context_worker_hash<<std::endl;
+					std::cout<<"context_worker_base_ptr"<<context_worker_base_ptr<<std::endl;
 					if (!context_worker_base_ptr) {
 						// This context worker has not registered. Panic
 						fprintf(stderr, "Error: context worker %ld-%ld has not registered\n", context_pp_rank, context_tp_rank);
@@ -404,6 +409,9 @@ void migrate_blocks2(
 				for (int is_value = 0; is_value < 2; ++is_value) {
 					const int64_t decoding_worker_hash = (decoding_pp_rank<<6) + decoding_tp_rank;
 					char* decoding_worker_base_ptr = (char*) (is_value ? decoding_worker_v_cache_addr[decoding_worker_hash] : decoding_worker_k_cache_addr[decoding_worker_hash]);
+					std::cout<<"is_value:"<<is_value<<std::endl;
+					std::cout<<"decoding_worker_hash:"<<decoding_worker_hash<<std::endl;
+					std::cout<<"decoding_worker_base_ptr:"<<decoding_worker_base_ptr<<std::endl;
 					if (!decoding_worker_base_ptr) {
 						// This decoding worker has not registered. Panic
 						fprintf(stderr, "Error: decoding worker %ld-%ld has not registered\n", decoding_pp_rank, decoding_tp_rank);
